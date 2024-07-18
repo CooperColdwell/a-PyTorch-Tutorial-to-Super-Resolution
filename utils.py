@@ -5,6 +5,7 @@ import random
 import torchvision.transforms.functional as FT
 import torch
 import math
+from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -27,20 +28,21 @@ def create_data_lists(train_folders, test_folders, min_size, output_folder):
     """
     print("\nCreating data lists... this may take some time.\n")
     train_images = list()
-    for d in train_folders:
-        for i in os.listdir(d):
-            img_path = os.path.join(d, i)
-            img = Image.open(img_path, mode='r')
-            if img.width >= min_size and img.height >= min_size:
-                train_images.append(img_path)
-    print("There are %d images in the training data.\n" % len(train_images))
-    with open(os.path.join(output_folder, 'train_images.json'), 'w') as j:
-        json.dump(train_images, j)
+    if train_folders is not None:
+        for d in train_folders:
+            for i in tqdm(os.listdir(d)):
+                img_path = os.path.join(d, i)
+                img = Image.open(img_path, mode='r')
+                if img.width >= min_size and img.height >= min_size:
+                    train_images.append(img_path)
+        print("There are %d images in the training data.\n" % len(train_images))
+        with open(os.path.join(output_folder, 'train_images.json'), 'w') as j:
+            json.dump(train_images, j)
 
     for d in test_folders:
         test_images = list()
         test_name = d.split("/")[-1]
-        for i in os.listdir(d):
+        for i in tqdm(os.listdir(d)):
             img_path = os.path.join(d, i)
             img = Image.open(img_path, mode='r')
             if img.width >= min_size and img.height >= min_size:
