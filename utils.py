@@ -6,6 +6,10 @@ import torchvision.transforms.functional as FT
 import torch
 import math
 from tqdm import tqdm
+from PIL import Image
+import matplotlib.pyplot as plt
+import numpy as np
+from skimage.transform import resize
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,20 +116,22 @@ class ImageTransforms(object):
     Image transformation pipeline.
     """
 
-    def __init__(self, split, crop_size, scaling_factor, lr_img_type, hr_img_type):
+    def __init__(self, split, crop_size, scaling_factor, lr_img_type, hr_img_type, 
+                 noise_threshold):
         """
         :param split: one of 'train' or 'test'
         :param crop_size: crop size of HR images
         :param scaling_factor: LR images will be downsampled from the HR images by this factor
         :param lr_img_type: the target format for the LR image; see convert_image() above for available formats
         :param hr_img_type: the target format for the HR image; see convert_image() above for available formats
+        :param noise_threshold: threshold above which gaussian noise is added
         """
         self.split = split.lower()
         self.crop_size = crop_size
         self.scaling_factor = scaling_factor
         self.lr_img_type = lr_img_type
         self.hr_img_type = hr_img_type
-
+        # self.noise = ClippedRandomNoise(clip_threshold=noise_threshold)
         assert self.split in {'train', 'test'}
 
     def __call__(self, img):
@@ -163,7 +169,28 @@ class ImageTransforms(object):
         lr_img = convert_image(lr_img, source='pil', target=self.lr_img_type)
         hr_img = convert_image(hr_img, source='pil', target=self.hr_img_type)
 
+        # lr_img = self.noise(lr_img)
+
         return lr_img, hr_img
+
+class ClippedRandomNoise(torch.nn.Module):
+    """
+    Pytorch transform to add clipped noise to input images. Samples from a Gaussian distribution,
+    then only selects positive values above one standard deviation. The resulting noise is then
+    shifted down such that the starting value is 0.
+    """
+    def __init__(self, clip_threshold):
+        super(ClippedRandomNoise, self).__init__()
+        self.clip_threshold = clip_threshold
+    
+    def forward(self, input_lr_image):
+        upper_lim = torch.max(input_lr_image)
+        noise = torch.randn(input_lr_image.size()) * upper_lim
+        mask = torch.abs(noise - self.clip_threshold*upper_lim) >= 0
+        input_lr_image = input_lr_image + noise*mask - self.clip_threshold*upper_lim
+        input_lr_image = torch.clamp(input_lr_image, max=upper_lim)
+
+        return input_lr_image
 
 
 class AverageMeter(object):
@@ -222,3 +249,65 @@ def adjust_learning_rate(optimizer, shrink_factor):
     for param_group in optimizer.param_groups:
         param_group['lr'] = param_group['lr'] * shrink_factor
     print("The new learning rate is %f\n" % (optimizer.param_groups[0]['lr'],))
+
+
+def visualize_superres(img, srresnet, device, halve=False):
+    """
+    Visualizes the super-resolved images from the SRResNet for comparison with the bicubic-upsampled image
+    and the original high-resolution (HR) image, using matplotlib.
+
+    :param img: filepath of the HR image
+    :param srresnet: the SRResNet model
+    :param device: the device to run the model on
+    :param halve: halve each dimension of the HR image
+    """
+    srresnet.eval()
+    
+    # Load image, downsample to obtain low-res version
+    hr_img = plt.imread(img)
+    if hr_img.dtype == np.uint8:
+        hr_img = hr_img.astype(np.float32) / 255.0
+    
+    if halve:
+        hr_img = resize(hr_img, (int(hr_img.shape[0] / 2), int(hr_img.shape[1] / 2)), 
+                        anti_aliasing=True)
+    
+    # For downsampling
+    lr_img = resize(hr_img, (int(hr_img.shape[0] / 4), int(hr_img.shape[1] / 4)), 
+                    anti_aliasing=True, mode='reflect')
+
+    # For bicubic upsampling
+    bicubic_img = resize(lr_img, (hr_img.shape[0], hr_img.shape[1]), 
+                        anti_aliasing=True, mode='reflect', order=3)
+    
+    # Super-resolution (SR) with SRResNet
+    lr_tensor = convert_image(lr_img, source='pil', target='imagenet-norm').unsqueeze(0).to(device)
+    sr_img_srresnet = srresnet(lr_tensor)
+    sr_img_srresnet = sr_img_srresnet.squeeze(0).cpu().detach()
+    sr_img_srresnet = convert_image(sr_img_srresnet, source='[-1, 1]', target='pil')
+    sr_img_srresnet = np.array(sr_img_srresnet) / 255.0
+
+    # Create plot
+    fig, axs = plt.subplots(2, 2, figsize=(12, 12))
+    fig.suptitle('Super-Resolution Comparison', fontsize=16)
+
+    axs[0, 0].imshow(bicubic_img)
+    axs[0, 0].set_title('Bicubic')
+    axs[0, 0].axis('off')
+
+    axs[0, 1].imshow(sr_img_srresnet)
+    axs[0, 1].set_title('SRResNet')
+    axs[0, 1].axis('off')
+
+    axs[1, 0].axis('off')  # Empty subplot where SRGAN would be
+
+    axs[1, 1].imshow(hr_img)
+    axs[1, 1].set_title('Original HR')
+    axs[1, 1].axis('off')
+
+    plt.tight_layout()
+    # plt.show()
+
+    srresnet.train()
+
+    return fig
