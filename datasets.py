@@ -11,7 +11,7 @@ class SRDataset(Dataset):
     A PyTorch Dataset to be used by a PyTorch DataLoader.
     """
 
-    def __init__(self, data_folder, split, crop_size, scaling_factor, lr_img_type, hr_img_type, test_data_name=None):
+    def __init__(self, data_folder, split, crop_size, scaling_factor, lr_img_type, hr_img_type, test_data_name=None, noise_probability:float=0.0, return_orig_lr=False, random_flips=False):
         """
         :param data_folder: # folder with JSON data files
         :param split: one of 'train' or 'test'
@@ -54,7 +54,11 @@ class SRDataset(Dataset):
                                          crop_size=self.crop_size,
                                          scaling_factor=self.scaling_factor,
                                          lr_img_type=self.lr_img_type,
-                                         hr_img_type=self.hr_img_type)
+                                         hr_img_type=self.hr_img_type,
+                                         noise_probability=noise_probability,
+                                         return_orig_lr=return_orig_lr,
+                                         random_flips=random_flips)
+        self.return_orig_lr = return_orig_lr
 
     def __getitem__(self, i):
         """
@@ -68,6 +72,11 @@ class SRDataset(Dataset):
         img = img.convert('RGB')
         if img.width <= 96 or img.height <= 96:
             print(self.images[i], img.width, img.height)
+
+        if self.return_orig_lr:
+            lr_img_new, hr_img, lr_img = self.transform(img)
+            return lr_img_new, hr_img, lr_img
+
         lr_img, hr_img = self.transform(img)
 
         return lr_img, hr_img

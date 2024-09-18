@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torchvision
 import math
+from attention import CBAM
 
 
 class ConvolutionalBlock(nn.Module):
@@ -9,7 +10,7 @@ class ConvolutionalBlock(nn.Module):
     A convolutional block, comprising convolutional, BN, activation layers.
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, batch_norm=False, activation=None):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, batch_norm=False, activation=None, groups=1):
         """
         :param in_channels: number of input channels
         :param out_channels: number of output channe;s
@@ -30,7 +31,7 @@ class ConvolutionalBlock(nn.Module):
         # A convolutional layer
         layers.append(
             nn.Conv2d(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride,
-                      padding=kernel_size // 2))
+                      padding=kernel_size // 2, groups=groups))
 
         # A batch normalization (BN) layer, if wanted
         if batch_norm is True:
@@ -98,7 +99,7 @@ class ResidualBlock(nn.Module):
     A residual block, comprising two convolutional blocks with a residual connection across them.
     """
 
-    def __init__(self, kernel_size=3, n_channels=64):
+    def __init__(self, kernel_size=3, n_channels=64, attn=False):
         """
         :param kernel_size: kernel size
         :param n_channels: number of input and output channels (same because the input must be added to the output)
@@ -112,6 +113,9 @@ class ResidualBlock(nn.Module):
         # The second convolutional block
         self.conv_block2 = ConvolutionalBlock(in_channels=n_channels, out_channels=n_channels, kernel_size=kernel_size,
                                               batch_norm=True, activation=None)
+        self.attn = attn
+        if attn:
+            self.cbam = CBAM(gate_channels=n_channels, reduction_ratio=16)
 
     def forward(self, input):
         """
@@ -123,6 +127,8 @@ class ResidualBlock(nn.Module):
         residual = input  # (N, n_channels, w, h)
         output = self.conv_block1(input)  # (N, n_channels, w, h)
         output = self.conv_block2(output)  # (N, n_channels, w, h)
+        if self.attn:
+            output = self.cbam(output)
         output = output + residual  # (N, n_channels, w, h)
 
         return output
@@ -158,7 +164,8 @@ class SRResNet(nn.Module):
         # Another convolutional block
         self.conv_block2 = ConvolutionalBlock(in_channels=n_channels, out_channels=n_channels,
                                               kernel_size=small_kernel_size,
-                                              batch_norm=True, activation=None)
+                                            #   batch_norm=True, activation=None)
+                                              batch_norm=False, activation=None)
 
         # Upscaling is done by sub-pixel convolution, with each such block upscaling by a factor of 2
         n_subpixel_convolution_blocks = int(math.log2(scaling_factor))
@@ -187,6 +194,135 @@ class SRResNet(nn.Module):
 
         return sr_imgs
 
+
+# class ResNetDenoiser(nn.Module):
+#     """
+#     From SRResNet, as defined in the paper.
+#     """
+
+#     def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16, scaling_factor=4, 
+#                  cbam=False):
+#                 # ):
+#         """
+#         :param large_kernel_size: kernel size of the first and last convolutions which transform the inputs and outputs
+#         :param small_kernel_size: kernel size of all convolutions in-between, i.e. those in the residual and subpixel convolutional blocks
+#         :param n_channels: number of channels in-between, i.e. the input and output channels for the residual and subpixel convolutional blocks
+#         :param n_blocks: number of residual blocks
+#         :param scaling_factor: factor to scale input images by (along both dimensions) in the subpixel convolutional block
+#         """
+#         super(ResNetDenoiser, self).__init__()
+
+#         # Scaling factor must be 2, 4, or 8
+#         scaling_factor = int(scaling_factor)
+#         assert scaling_factor in {2, 4, 8}, "The scaling factor must be 2, 4, or 8!"
+
+#         # The first convolutional block
+#         self.conv_block1 = ConvolutionalBlock(in_channels=3, out_channels=n_channels, kernel_size=large_kernel_size,
+#                                               batch_norm=False, activation='PReLu')
+
+#         ## FIXME: could put CBAM after every residual conv block (or inside?)
+#         # A sequence of n_blocks residual blocks, each containing a skip-connection across the block
+#         self.residual_blocks = nn.Sequential(
+#             *[ResidualBlock(kernel_size=small_kernel_size, n_channels=n_channels, attn=cbam) for i in range(n_blocks)])
+
+#         # Another convolutional block
+#         self.conv_block2 = ConvolutionalBlock(in_channels=n_channels, out_channels=n_channels,
+#                                               kernel_size=small_kernel_size,
+#                                               batch_norm=True, activation=None)
+
+#         # The last convolutional block of SRResNet-ish
+#         self.conv_block3 = ConvolutionalBlock(in_channels=n_channels, out_channels=3, kernel_size=large_kernel_size,
+#                                               batch_norm=False, activation='leakyrelu')
+#         self.conv_block3_1 = ConvolutionalBlock(in_channels=3, out_channels=3, kernel_size=large_kernel_size,
+#                                               batch_norm=False, activation='leakyrelu', groups=1)
+#         self.conv_block3_2 = ConvolutionalBlock(in_channels=3, out_channels=3, kernel_size=small_kernel_size,
+#                                         batch_norm=False, activation='tanh', groups=1)
+#         # if cbam:
+#         #     self.attn_0 = CBAM(gate_channels=64, reduction_ratio=16, pool_types=['avg', 'max'], no_spatial=False)
+#             # self.attn_1 = CBAM(gate_channels=3, reduction_ratio=16, pool_types=['avg', 'max'], no_spatial=False)
+
+
+#     def forward(self, lr_imgs):
+#         """
+#         Forward prop.
+
+#         :param lr_imgs: low-resolution input images, a tensor of size (N, 3, w, h)
+#         :return: super-resolution output images, a tensor of size (N, 3, w * scaling factor, h * scaling factor)
+#         """
+#         output = self.conv_block1(lr_imgs)  # (N, 3, w, h)
+#         residual = output  # (N, n_channels, w, h)
+#         output = self.residual_blocks(output)  # (N, n_channels, w, h)
+#         output = self.conv_block2(output)  # (N, n_channels, w, h)
+
+#         # output = self.attn_0(output)
+
+#         output = output + residual  # (N, n_channels, w, h)
+
+#         sr_imgs = self.conv_block3(output)  # (N, 3, w * scaling factor, h * scaling factor)
+#         # sr_imgs = self.attn_1(sr_imgs)
+#         sr_imgs = self.conv_block3_1(sr_imgs)
+#         sr_imgs = self.conv_block3_2(sr_imgs)
+
+#         return sr_imgs
+
+class ResNetDenoiser(nn.Module):
+    """
+    The SRResNet, as defined in the paper.
+    """
+
+    def __init__(self, large_kernel_size=9, small_kernel_size=3, n_channels=64, n_blocks=16):
+        """
+        :param large_kernel_size: kernel size of the first and last convolutions which transform the inputs and outputs
+        :param small_kernel_size: kernel size of all convolutions in-between, i.e. those in the residual and subpixel convolutional blocks
+        :param n_channels: number of channels in-between, i.e. the input and output channels for the residual and subpixel convolutional blocks
+        :param n_blocks: number of residual blocks
+        :param scaling_factor: factor to scale input images by (along both dimensions) in the subpixel convolutional block
+        """
+        super(ResNetDenoiser, self).__init__()
+
+        # # Scaling factor must be 2, 4, or 8
+        # scaling_factor = int(scaling_factor)
+        # assert scaling_factor in {2, 4, 8}, "The scaling factor must be 2, 4, or 8!"
+
+        # The first convolutional block
+        self.conv_block1 = ConvolutionalBlock(in_channels=3, out_channels=n_channels, kernel_size=large_kernel_size,
+                                              batch_norm=False, activation='PReLu')
+
+        # A sequence of n_blocks residual blocks, each containing a skip-connection across the block
+        self.residual_blocks = nn.Sequential(
+            *[ResidualBlock(kernel_size=small_kernel_size, n_channels=n_channels) for i in range(n_blocks)])
+
+        # Another convolutional block
+        self.conv_block2 = ConvolutionalBlock(in_channels=n_channels, out_channels=n_channels,
+                                              kernel_size=small_kernel_size,
+                                              batch_norm=True, activation=None)
+
+        # # Upscaling is done by sub-pixel convolution, with each such block upscaling by a factor of 2
+        # n_subpixel_convolution_blocks = int(math.log2(scaling_factor))
+        # self.subpixel_convolutional_blocks = nn.Sequential(
+        #     *[SubPixelConvolutionalBlock(kernel_size=small_kernel_size, n_channels=n_channels, scaling_factor=2) for i
+        #       in range(n_subpixel_convolution_blocks)])
+
+        # The last convolutional block
+        self.conv_block3 = ConvolutionalBlock(in_channels=n_channels, out_channels=3, kernel_size=large_kernel_size,
+                                              batch_norm=False, activation='Tanh')
+
+    def forward(self, lr_imgs):
+        """
+        Forward prop.
+
+        :param lr_imgs: low-resolution input images, a tensor of size (N, 3, w, h)
+        :return: denoised output images, a tensor of size (N, 3, w, h)
+        """
+        output = self.conv_block1(lr_imgs)  # (N, 3, w, h)
+        residual = output  # (N, n_channels, w, h)
+        output = self.residual_blocks(output)  # (N, n_channels, w, h)
+        output = self.conv_block2(output)  # (N, n_channels, w, h)
+        output = output + residual  # (N, n_channels, w, h)
+        # output = self.subpixel_convolutional_blocks(output)  # (N, n_channels, w * scaling factor, h * scaling factor)
+        dn_imgs = self.conv_block3(output)  # (N, 3, w * scaling factor, h * scaling factor)
+
+        return dn_imgs
 
 class Generator(nn.Module):
     """
@@ -252,10 +388,10 @@ class Discriminator(nn.Module):
         # The first convolutional block is unique because it does not employ batch normalization
         conv_blocks = list()
         for i in range(n_blocks):
-            out_channels = (n_channels if i is 0 else in_channels * 2) if i % 2 is 0 else in_channels
+            out_channels = (n_channels if i == 0 else in_channels * 2) if (i % 2) == 0 else in_channels
             conv_blocks.append(
                 ConvolutionalBlock(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size,
-                                   stride=1 if i % 2 is 0 else 2, batch_norm=i is not 0, activation='LeakyReLu'))
+                                   stride=1 if (i % 2) == 0 else 2, batch_norm=(i != 0), activation='LeakyReLu'))
             in_channels = out_channels
         self.conv_blocks = nn.Sequential(*conv_blocks)
 
@@ -304,7 +440,7 @@ class TruncatedVGG19(nn.Module):
         super(TruncatedVGG19, self).__init__()
 
         # Load the pre-trained VGG19 available in torchvision
-        vgg19 = torchvision.models.vgg19(pretrained=True)
+        vgg19 = torchvision.models.vgg19(weights=torchvision.models.VGG19_Weights.IMAGENET1K_V1)
 
         maxpool_counter = 0
         conv_counter = 0
